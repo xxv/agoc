@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+
+import configparser
+import json
+import os
+import re
+import sys
+import urllib.request
+
+class AgocontrolRpc:
+    request_id=1
+    devices_reverse = {}
+
+    def __init__(self, url):
+        self.url = url
+
+    def to_values(self, command, uuid=None):
+        values = {
+            'method': 'message',
+            'params': {
+                'content': {
+                    'command': command,
+                },
+            },
+            'id': self.request_id,
+            'jsonrpc': '2.0',
+        }
+
+        if uuid:
+            values['params']['content']['uuid'] = uuid
+
+        self.request_id += 1
+
+        return values
+
+    def request(self, command, uuid=None):
+        values = self.to_values(command, uuid)
+        req = urllib.request.Request(self.url, json.dumps(values).encode('utf-8'))
+        response = urllib.request.urlopen(req)
+        try:
+            rawdata = str(response.read(), 'utf-8')
+            retval = json.loads(rawdata)
+            if 'result' in retval:
+                return retval['result']
+        except ValueError as e:
+            print("ValueError exception:", e)
+            print("Raw data:", rawdata)
+            sys.exit(1)
+
+    def load_inventory(self):
+        self.inventory = self.request('inventory')['data']
+        for uuid, device in self.inventory['devices'].items():
+            if 'name' in device:
+                slug = self.to_device_slug(device['name'])
+                if not slug:
+                    continue
+                if slug in self.devices_reverse:
+                    print("Warning: duplicate device name: {:s}({:s})".format(device['name'], slug))
+                    continue
+                self.devices_reverse[slug] = uuid
+
+    def to_device_slug(self, name):
+        return re.sub(r'[^a-z0-9]', '', name.lower())
+
+    def lookup_device(self, search):
+        search_slug = self.to_device_slug(search)
+
+        exact_match = self.devices_reverse.get(search_slug, None)
+
+        if exact_match:
+            return [{'name': search_slug, 'uuid': exact_match }]
+
+        inexact_matches = list(filter(lambda slug: search_slug in slug, self.devices_reverse))
+        return list(map(lambda slug: { 'name': slug, 'uuid': self.devices_reverse[slug] }, inexact_matches))
+
+    def command_device(self, device, command):
+        devices = self.lookup_device(device)
+        count = len(devices)
+        if count == 0:
+            print("Device not found matching '{:s}'".format(device))
+            sys.exit(1)
+        elif count == 1:
+            device_uuid = devices[0]['uuid']
+
+            if device_uuid:
+                print("UUID: {:s}".format(device_uuid))
+                return self.request(command, device_uuid)
+        else:
+            print("Multiple devices match '{:s}':".format(device))
+            for d in devices:
+                print(" * {:s} ({:s})".format(d['name'], d['uuid']))
+            sys.exit(1)
+
+if len(sys.argv) != 3:
+    print("{:s} DEVICE COMMAND".format(sys.argv[0]))
+    sys.exit(1)
+device = sys.argv[1]
+command = sys.argv[2]
+
+config = configparser.ConfigParser()
+
+config_path = os.path.join(os.path.expanduser('~'), '.agoc.conf')
+config.read(config_path)
+
+a = AgocontrolRpc(config['server']['url'])
+a.load_inventory()
+a.command_device(device, command)
+
